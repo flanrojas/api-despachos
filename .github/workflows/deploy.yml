@@ -68,3 +68,4 @@ jobs:
               -e DB_USERNAME="$DB_USERNAME" \
               -e DB_PASSWORD="$DB_PASSWORD" \
               "$ECR_REPO_URL:latest"
+ 
