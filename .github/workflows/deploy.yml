@@ -2,7 +2,7 @@ name: CI/CD Back Despacho
 
 on:
   push:
-    branches: ["main"]
+    branches: ["deploy"]
   workflow_dispatch:
 
 jobs:
@@ -25,47 +25,56 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build image
-        run: |
-          docker build -t despacho-api .
+        run: docker build -t back-despachos .
 
       - name: Tag image
-        run: docker tag despacho-api:latest ${{ vars.ECR_REPO_URL }}:latest
+        run: docker tag back-despachos:latest ${{ vars.ECR_REPO_URL }}:latest
 
       - name: Push image
         run: docker push ${{ vars.ECR_REPO_URL }}:latest
 
-      - name: Deploy on EC2 via SSH
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
-          ECR_REPO_URL: ${{ vars.ECR_REPO_URL }}
-          DB_ENDPOINT: ${{ vars.DB_ENDPOINT }}
-          DB_PORT: ${{ vars.DB_PORT }}
-          DB_NAME: ${{ vars.DB_NAME }}
-          DB_USERNAME: ${{ secrets.DB_USERNAME }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-        with:
-          host: ${{ secrets.EC2_PUBLIC_IP }}
-          username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
-          envs: AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_SESSION_TOKEN,AWS_REGION,ECR_REPO_URL,DB_ENDPOINT,DB_PORT,DB_NAME,DB_USERNAME,DB_PASSWORD
-          script: |
-            aws ecr get-login-password --region "$AWS_REGION" \
-              | docker login --username AWS --password-stdin "$(echo "$ECR_REPO_URL" | cut -d/ -f1)"
-            docker pull "$ECR_REPO_URL:latest"
-            docker stop despacho-api || true
-            docker rm despacho-api || true
-            docker run -d \
-              --name despacho-api \
-              --restart unless-stopped \
-              -p 8081:8081 \
-              -e DB_ENDPOINT="$DB_ENDPOINT" \
-              -e DB_PORT="$DB_PORT" \
-              -e DB_NAME="$DB_NAME" \
-              -e DB_USERNAME="$DB_USERNAME" \
-              -e DB_PASSWORD="$DB_PASSWORD" \
-              "$ECR_REPO_URL:latest" 
- 
+      - name: Deploy on EC2 via SSM
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_BACKEND_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands='[
+              "# Login to ECR",
+              "aws ecr get-login-password --region ${{ vars.AWS_REGION }} | docker login --username AWS --password-stdin $(echo ${{ vars.ECR_REPO_URL }} | cut -d/ -f1)",
+              
+              "# Pull imagen actualizada",
+              "docker pull ${{ vars.ECR_REPO_URL }}:latest",
+              
+              "# Crear red si no existe",
+              "docker network create despachos-net || true",
+              
+              "# Iniciar MySQL si no está corriendo",
+              "if [ ! \"$(docker ps -q -f name=mysql-despachos)\" ]; then",
+              "  docker stop mysql-despachos || true",
+              "  docker rm mysql-despachos || true",
+              "  docker run -d --name mysql-despachos --network despachos-net -e MYSQL_ROOT_PASSWORD=${{ secrets.DB_PASSWORD }} -e MYSQL_DATABASE=${{ secrets.DB_NAME }} -e MYSQL_USER=${{ secrets.DB_USERNAME }} -e MYSQL_PASSWORD=${{ secrets.DB_PASSWORD }} -p 3306:3306 -v mysql_data:/var/lib/mysql mysql:8.0",
+              "  echo Waiting for MySQL...",
+              "  sleep 30",
+              "fi",
+              
+              "# Deploy backend",
+              "docker stop back-despachos || true",
+              "docker rm back-despachos || true",
+              "docker run -d --name back-despachos --network despachos-net -p 8080:8080 -e DB_ENDPOINT=mysql-despachos -e DB_PORT=${{ secrets.DB_PORT }} -e DB_NAME=${{ secrets.DB_NAME }} -e DB_USERNAME=${{ secrets.DB_USERNAME }} -e DB_PASSWORD=${{ secrets.DB_PASSWORD }} ${{ vars.ECR_REPO_URL }}:latest"
+            ]' \
+            --query "Command.CommandId" \
+            --output text)
+          
+          echo "SSM Command ID: $COMMAND_ID"
+          
+          # Esperar que el comando termine
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ secrets.EC2_BACKEND_ID }}"
+          
+          # Ver el resultado
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ secrets.EC2_BACKEND_ID }}" \
+            --query "StandardOutputContent" \
+            --output text

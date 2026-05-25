@@ -1,40 +1,38 @@
 services:
-  mysql:
-    image: mysql:8.4
-    container_name: despacho-mysql
+  db:
+    image: mysql:8.0
+    container_name: mysql-despachos
+    restart: unless-stopped
     environment:
-      MYSQL_DATABASE: ${DB_NAME:-despachos_db}
-      MYSQL_USER: ${DB_USERNAME:-despacho_user}
-      MYSQL_PASSWORD: ${DB_PASSWORD:-despacho_pass}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_pass}
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: despachos_db
+      MYSQL_USER: despachos_user
+      MYSQL_PASSWORD: despachos_pass
+    ports:
+      - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 20s
-    restart: unless-stopped
+      retries: 5
 
-  despacho-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: despacho-api
-    image: despacho-api:latest
-    ports:
-      - "8081:8081"
-    environment:
-      DB_ENDPOINT: mysql
-      DB_PORT: ${DB_PORT:-3306}
-      DB_NAME: ${DB_NAME:-despachos_db}
-      DB_USERNAME: ${DB_USERNAME:-despacho_user}
-      DB_PASSWORD: ${DB_PASSWORD:-despacho_pass}
-    depends_on:
-      mysql:
-        condition: service_healthy
+  app:
+    build: .
+    container_name: springboot-despachos
     restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      DB_ENDPOINT: db
+      DB_PORT: 3306
+      DB_NAME: despachos_db
+      DB_USERNAME: despachos_user
+      DB_PASSWORD: despachos_pass
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   mysql_data:
